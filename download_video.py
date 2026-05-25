@@ -14,6 +14,7 @@
   python download_video.py --page-url <链接> --output-dir ./videos --output video.ts
 """
 import argparse
+import io
 import json
 import os
 import signal
@@ -22,6 +23,10 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+# 修复 Windows GBK 终端无法显示 emoji 的问题
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 # AES-128-CBC 解密 — 优先用 pycryptodome，没有则用 cryptography
 try:
@@ -159,69 +164,68 @@ def fetch_m3u8_via_curl(url: str, referer: str | None) -> str:
         raise RuntimeError("系统未安装 curl，无法降级")
 
 
-def find_playwright_cli() -> str:
-    """自动检测 playwright-cli 路径"""
-    candidates = ["playwright-cli"]
-    if sys.platform == "win32":
-        appdata = os.environ.get("APPDATA", "")
-        if appdata:
-            candidates.append(os.path.join(appdata, "npm", "playwright-cli.cmd"))
-            candidates.append(os.path.join(appdata, "npm", "playwright-cli"))
-    for cmd in candidates:
-        import shutil
-        found = shutil.which(cmd)
-        if found:
-            return found
-    return "playwright-cli"
-
-
 def extract_m3u8_from_page(page_url: str, referer: str | None = None) -> str:
-    """用 Playwright 打开视频页面，自动提取 m3u8 地址"""
+    """从视频页面 HTML 中提取 m3u8 地址（无需浏览器，直接 HTTP 请求）"""
     import re
-    pw_cli = find_playwright_cli()
-    env = {**os.environ, "NODE_OPTIONS": ""}
 
-    print(f"  🔍 在页面中查找 m3u8...", flush=True)
+    print(f"  🔍 抓取页面分析 m3u8...", flush=True)
 
-    for attempt in range(3):
+    # 用请求获取页面 HTML
+    headers = {"User-Agent": UA}
+    if referer:
+        headers["Referer"] = referer
+
+    for attempt in range(2):
         try:
-            subprocess.run([pw_cli, "kill-all"], env=env,
-                           capture_output=True, timeout=10)
-            time.sleep(2)
+            resp = requests.get(page_url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            html = resp.text
 
-            subprocess.run([pw_cli, "open", page_url], env=env,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=30)
-            time.sleep(2)
-
-            result = subprocess.run(
-                [pw_cli, "eval",
-                 'JSON.stringify(Array.from(document.querySelectorAll("source")).map(function(s){return {src:s.src}}))'],
-                env=env, capture_output=True, text=True, timeout=10)
-
-            subprocess.run([pw_cli, "close"], env=env,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=5)
-
-            m = re.search(r'https://[^"\s\\]+\.m3u8[^"\s\\]*', result.stdout)
-            if m:
-                url = m.group(0).rstrip("\\/")
+            # 策略 1: 直接找 .m3u8 链接
+            urls = re.findall(r'https?://[^"\'<>\s]+\.m3u8[^"\'<>\s]*', html)
+            if urls:
+                url = urls[0].rstrip("\\/")
                 print(f"  ✓ 提取成功: {url[:80]}...", flush=True)
                 return url
 
-            print(f"  ⚠ 第 {attempt + 1}/3 次尝试未找到 m3u8", flush=True)
+            # 策略 2: 找 JS 变量中的 m3u8（常见 video_url / url / src 等）
+            patterns = [
+                r'["\'](https?://[^"\']+\.m3u8[^"\']*)["\']',
+                r'video[_\-]?url["\']?\s*[:=]\s*["\'](https?://[^"\']+)["\']',
+                r'url["\']?\s*[:=]\s*["\'](https?://[^"\']+\.m3u8[^"\']*)["\']',
+                r'src["\']?\s*[:=]\s*["\'](https?://[^"\']+\.m3u8[^"\']*)["\']',
+            ]
+            for pat in patterns:
+                m = re.search(pat, html, re.IGNORECASE)
+                if m:
+                    url = m.group(1).rstrip("\\/")
+                    print(f"  ✓ 提取成功: {url[:80]}...", flush=True)
+                    return url
 
-        except subprocess.TimeoutExpired:
-            print(f"  ⚠ 第 {attempt + 1}/3 次超时", flush=True)
-        except FileNotFoundError:
-            print(f"\n[ERROR] 未安装 playwright-cli，请执行:", flush=True)
-            print(f"       npm install -g @playwright/cli", flush=True)
-            print(f"       playwright-cli install", flush=True)
-            sys.exit(1)
-        except Exception as e:
-            print(f"  ⚠ 第 {attempt + 1}/3 次异常: {e}", flush=True)
+            print(f"  ⚠ 第 {attempt + 1}/2 次未找到 m3u8 链接", flush=True)
+
+            # 策略 3: 如果有 iframe 嵌套，尝试获取 iframe 中的内容
+            iframes = re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', html)
+            for iframe_src in iframes:
+                if not iframe_src.startswith("http"):
+                    from urllib.parse import urljoin
+                    iframe_src = urljoin(page_url, iframe_src)
+                try:
+                    resp2 = requests.get(iframe_src, headers=headers, timeout=10)
+                    iframe_html = resp2.text
+                    urls = re.findall(r'https?://[^"\'<>\s]+\.m3u8[^"\'<>\s]*', iframe_html)
+                    if urls:
+                        url = urls[0].rstrip("\\/")
+                        print(f"  ✓ 在 iframe 中提取成功: {url[:80]}...", flush=True)
+                        return url
+                except Exception:
+                    continue
+
+        except requests.RequestException as e:
+            print(f"  ⚠ 第 {attempt + 1}/2 次请求失败: {e}", flush=True)
 
     print("\n[ERROR] 无法从页面提取 m3u8 地址", flush=True)
+    print("  提示: 可以先手动获取 m3u8 地址，再用 --url 参数下载", flush=True)
     sys.exit(1)
 
 
