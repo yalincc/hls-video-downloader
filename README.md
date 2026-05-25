@@ -41,16 +41,19 @@ playwright-cli install
 ### 命令行下载
 
 ```bash
+# 🎯 给视频页面链接，自动提取 m3u8 并下载（推荐）
+python download_video.py --page-url https://example.com/video/12345
+
 # 直接下载（已知 m3u8 地址）
 python download_video.py --url https://example.com/video/index.m3u8 --output video.ts
 
 # 带 Referer（防盗链网站）
-python download_video.py --url https://example.com/video/index.m3u8 \
+python download_video.py --page-url https://example.com/video/12345 \
     --referer https://example.com/ \
     --output video.ts
 
 # 自定义输出目录和并发数
-python download_video.py --url <m3u8> \
+python download_video.py --page-url https://example.com/video/12345 \
     --output-dir ./my_videos \
     --output movie.ts \
     --workers 8
@@ -89,7 +92,8 @@ python web_downloader/server.py    # Web 服务 → http://localhost:5001
 
 ```
 ├── download_video.py              # 核心下载引擎
-│   ├── --url          m3u8 播放列表地址（必填）
+│   ├── --page-url     视频页面链接，自动提取 m3u8（推荐）
+│   ├── --url          直接指定 m3u8 播放列表地址
 │   ├── --referer      Referer 请求头（防盗链网站必填）
 │   ├── --output       输出文件名（默认: video.ts）
 │   ├── --output-dir   输出目录（默认: 当前目录）

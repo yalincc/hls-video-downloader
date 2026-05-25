@@ -4,8 +4,14 @@
 下载加密或未加密的 HLS 流视频，支持 AES-128 解密、断点续传、进度显示。
 
 用法:
+  # 直接给 m3u8 地址
   python download_video.py --url <m3u8地址> [--referer <来源页>]
-  python download_video.py --url <m3u8地址> --output-dir ./videos --output video.ts
+
+  # 给视频页面地址，自动提取 m3u8（推荐）
+  python download_video.py --page-url <视频页面链接> [--referer <来源页>]
+
+  # 指定输出目录
+  python download_video.py --page-url <链接> --output-dir ./videos --output video.ts
 """
 import argparse
 import json
@@ -43,7 +49,8 @@ signal.signal(signal.SIGINT, _handle_sigint)
 
 def parse_args():
     p = argparse.ArgumentParser(description="通用 m3u8 / HLS 视频下载器")
-    p.add_argument("--url", required=True, help="m3u8 播放列表地址")
+    p.add_argument("--url", default=None, help="m3u8 播放列表地址（跟 --page-url 二选一）")
+    p.add_argument("--page-url", default=None, help="视频页面链接，自动提取 m3u8（跟 --url 二选一）")
     p.add_argument("--referer", default=None, help="Referer 请求头（防盗链网站必填）")
     p.add_argument("--output", default=None, help="输出文件名（默认: video.ts）")
     p.add_argument("--output-dir", default=None, help="输出目录（默认: 当前目录）")
@@ -147,6 +154,72 @@ def fetch_m3u8_via_curl(url: str, referer: str | None) -> str:
         raise RuntimeError("系统未安装 curl，无法降级")
 
 
+def find_playwright_cli() -> str:
+    """自动检测 playwright-cli 路径"""
+    candidates = ["playwright-cli"]
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA", "")
+        if appdata:
+            candidates.append(os.path.join(appdata, "npm", "playwright-cli.cmd"))
+            candidates.append(os.path.join(appdata, "npm", "playwright-cli"))
+    for cmd in candidates:
+        import shutil
+        found = shutil.which(cmd)
+        if found:
+            return found
+    return "playwright-cli"
+
+
+def extract_m3u8_from_page(page_url: str, referer: str | None = None) -> str:
+    """用 Playwright 打开视频页面，自动提取 m3u8 地址"""
+    import re
+    pw_cli = find_playwright_cli()
+    env = {**os.environ, "NODE_OPTIONS": ""}
+
+    print(f"  🔍 在页面中查找 m3u8...", flush=True)
+
+    for attempt in range(3):
+        try:
+            subprocess.run([pw_cli, "kill-all"], env=env,
+                           capture_output=True, timeout=10)
+            time.sleep(2)
+
+            subprocess.run([pw_cli, "open", page_url], env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=30)
+            time.sleep(2)
+
+            result = subprocess.run(
+                [pw_cli, "eval",
+                 'JSON.stringify(Array.from(document.querySelectorAll("source")).map(function(s){return {src:s.src}}))'],
+                env=env, capture_output=True, text=True, timeout=10)
+
+            subprocess.run([pw_cli, "close"], env=env,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=5)
+
+            m = re.search(r'https://[^"\s\\]+\.m3u8[^"\s\\]*', result.stdout)
+            if m:
+                url = m.group(0).rstrip("\\/")
+                print(f"  ✓ 提取成功: {url[:80]}...", flush=True)
+                return url
+
+            print(f"  ⚠ 第 {attempt + 1}/3 次尝试未找到 m3u8", flush=True)
+
+        except subprocess.TimeoutExpired:
+            print(f"  ⚠ 第 {attempt + 1}/3 次超时", flush=True)
+        except FileNotFoundError:
+            print(f"\n[ERROR] 未安装 playwright-cli，请执行:", flush=True)
+            print(f"       npm install -g @playwright/cli", flush=True)
+            print(f"       playwright-cli install", flush=True)
+            sys.exit(1)
+        except Exception as e:
+            print(f"  ⚠ 第 {attempt + 1}/3 次异常: {e}", flush=True)
+
+    print("\n[ERROR] 无法从页面提取 m3u8 地址", flush=True)
+    sys.exit(1)
+
+
 def write_status(status_file: str | None, **kwargs):
     """写入 JSON 状态文件供 Web 界面读取"""
     if not status_file:
@@ -160,6 +233,28 @@ def write_status(status_file: str | None, **kwargs):
 
 def main():
     args = parse_args()
+
+    # ---- 处理页面提取模式 --page-url ----
+    if args.page_url:
+        m3u8_url = args.url if args.url else None
+        if not m3u8_url:
+            # 从页面自动提取
+            print(f"[1/4] 打开视频页面提取 m3u8", flush=True)
+            print(f"       {args.page_url}", flush=True)
+            m3u8_url = extract_m3u8_from_page(args.page_url, args.referer)
+            print(f"       → {m3u8_url[:80]}...", flush=True)
+        # 自动补 referer（如果用页面url且没手工指定）
+        if not args.referer:
+            from urllib.parse import urlparse
+            parsed = urlparse(args.page_url)
+            args.referer = f"{parsed.scheme}://{parsed.netloc}/"
+        args.url = m3u8_url
+
+    if not args.url:
+        print("[ERROR] 请提供 --url（m3u8 地址）或 --page-url（视频页面链接）")
+        print("   python download_video.py --page-url <视频页面链接>")
+        sys.exit(1)
+
     session = make_session(args.referer)
 
     # ---- 确定输出路径 ----
@@ -172,8 +267,9 @@ def main():
 
     start = time.time()
 
-    # ---- [1/4] 获取 m3u8 播放列表 ----
-    print(f"[1/4] 获取 m3u8 播放列表", flush=True)
+    # ---- 获取 m3u8 播放列表 ----
+    step_n = "2/4" if args.page_url else "1/4"
+    print(f"[{step_n}] 获取 m3u8 播放列表", flush=True)
     print(f"       {args.url}", flush=True)
     try:
         ts_urls, key_url, iv = parse_m3u8(session, args.url, args.referer)
@@ -206,7 +302,8 @@ def main():
             print(f"       [ERROR] 获取密钥失败: {e}", flush=True)
             sys.exit(1)
 
-    # ---- [2/4] 断点续传检查 ----
+    step_dl = "3/4" if args.page_url else "2/4"
+    # ---- 断点续传检查 ----
     resume_from = 0
     if not args.no_resume:
         existing_segs = sorted(tmpdir.glob("seg_*.ts"))
@@ -222,8 +319,8 @@ def main():
                 print(f"       🔄 检测到 {resume_from} 个已下载分片，继续下载", flush=True)
         write_status(args.status_file, done=resume_from, total=len(ts_urls))
 
-    # ---- [3/4] 并发下载 ----
-    print(f"[3/4] 下载分片（workers={args.workers}）", flush=True)
+    # ---- 并发下载 ----
+    print(f"[{step_dl}] 下载分片（workers={args.workers}）", flush=True)
 
     total = len(ts_urls)
     pbar = tqdm(
@@ -303,8 +400,9 @@ def main():
         print("[ERROR] 无成功分片，退出。", flush=True)
         sys.exit(1)
 
-    # ---- [4/4] 合并 ----
-    print(f"[4/4] 合并 {len(downloaded)} 个分片 → {out_path}", flush=True)
+    step_merge = "4/4" if args.page_url else "3/4"
+    # ---- 合并 ----
+    print(f"[{step_merge}] 合并 {len(downloaded)} 个分片 → {out_path}", flush=True)
     with open(out_path, "wb") as fout:
         for idx in sorted(downloaded):
             fout.write(Path(downloaded[idx]).read_bytes())
