@@ -23,7 +23,17 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from Crypto.Cipher import AES
+# AES-128-CBC 解密 — 优先用 pycryptodome，没有则用 cryptography
+try:
+    from Crypto.Cipher import AES as _AES
+    def aes_decrypt(data: bytes, key: bytes, iv: bytes) -> bytes:
+        return _AES.new(key, _AES.MODE_CBC, iv=iv).decrypt(data)
+except ImportError:
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    def aes_decrypt(data: bytes, key: bytes, iv: bytes) -> bytes:
+        c = Cipher(algorithms.AES(key), modes.CBC(iv))
+        d = c.decryptor()
+        return d.update(data) + d.finalize()
 import requests
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
@@ -108,12 +118,7 @@ def fetch_key(session: requests.Session, key_url: str) -> bytes:
     return resp.content
 
 
-def decrypt_segment(data: bytes, key: bytes, iv: bytes | None, seg_index: int) -> bytes:
-    """AES-128-CBC 解密单个 TS 分片"""
-    if iv is None:
-        iv = seg_index.to_bytes(16, byteorder="big")
-    cipher = AES.new(key, AES.MODE_CBC, iv=iv)
-    return cipher.decrypt(data)
+
 
 
 def _parse_m3u8_lines(text: str, base_url: str):
@@ -355,8 +360,7 @@ def main():
                 # AES-128 解密
                 if key:
                     seg_iv = iv if iv else idx.to_bytes(16, byteorder="big")
-                    cipher = AES.new(key, AES.MODE_CBC, iv=seg_iv)
-                    data = cipher.decrypt(data)
+                    data = aes_decrypt(data, key, seg_iv)
 
                 fname.write_bytes(data)
                 return idx, str(fname)

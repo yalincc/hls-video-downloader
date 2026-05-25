@@ -1,4 +1,6 @@
 flask>=2.0
 requests>=2.25
 tqdm>=4.60
+# AES-128 解密（二选一即可，cryptography 常预装）
 pycryptodome>=3.10
+# cryptography>=35.0
