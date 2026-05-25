@@ -1,16 +1,12 @@
 """
 后台下载 Worker
-监听队列文件 queue.txt，逐个处理：
-  1. 用 playwright-cli 从页面提取 m3u8 地址
-  2. 调用 download_video.py 下载
-  3. 写状态文件和日志供 Web 界面读取
+监听队列文件 queue.txt，逐个交给 download_video.py 处理。
+自动提取 m3u8 + 下载 + 合并，全自动。
 
 用法: python web_downloader/worker.py
 """
 import json
-import os
 import re
-import shutil
 import subprocess
 import sys
 import time
@@ -45,69 +41,6 @@ def log(msg: str):
         pass
 
 
-def find_playwright_cli() -> str:
-    """自动检测 playwright-cli 路径"""
-    # 优先找全局安装的
-    candidates = ["playwright-cli"]
-    # Windows 下常见位置
-    if sys.platform == "win32":
-        appdata = os.environ.get("APPDATA", "")
-        if appdata:
-            candidates.append(os.path.join(appdata, "npm", "playwright-cli.cmd"))
-            candidates.append(os.path.join(appdata, "npm", "playwright-cli"))
-    for cmd in candidates:
-        found = shutil.which(cmd)
-        if found:
-            return found
-    # 最后 fallback
-    return "playwright-cli"
-
-
-def extract_m3u8(pw_cli: str, page_url: str) -> str | None:
-    """用 playwright-cli 打开页面，提取 m3u8 地址"""
-    env = {**os.environ, "NODE_OPTIONS": ""}
-    for attempt in range(3):
-        try:
-            subprocess.run([pw_cli, "kill-all"], env=env,
-                           capture_output=True, timeout=10)
-            time.sleep(2)
-
-            subprocess.run([pw_cli, "open", page_url], env=env,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=30)
-            time.sleep(2)
-
-            result = subprocess.run(
-                [pw_cli, "eval",
-                 'JSON.stringify(Array.from(document.querySelectorAll("source")).map(function(s){return {src:s.src}}))'],
-                env=env, capture_output=True, text=True, timeout=10)
-
-            subprocess.run([pw_cli, "close"], env=env,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=5)
-
-            m = re.search(r'https://[^"\s\\]+\.m3u8[^"\s\\]*', result.stdout)
-            if m:
-                url = m.group(0).rstrip("\\/")
-                log(f"  ✓ m3u8: {url[:80]}...")
-                return url
-            log(f"  ⚠ 尝试 {attempt + 1}/3 未找到 m3u8")
-        except subprocess.TimeoutExpired:
-            log(f"  ⚠ 尝试 {attempt + 1}/3 超时")
-        except FileNotFoundError:
-            log(f"  ❌ 未找到 playwright-cli，请执行: npm install -g @playwright/cli")
-            return None
-        except Exception as e:
-            log(f"  ⚠ 尝试 {attempt + 1}/3 异常: {e}")
-    return None
-
-
-def get_referer(page_url: str) -> str:
-    """从页面 URL 提取 referer (协议 + 域名)"""
-    m = re.match(r'(https?://[^/]+)', page_url)
-    return m.group(1) + "/" if m else ""
-
-
 def write_status(task_id: str, **kwargs):
     """写入指定任务的 JSON 状态文件"""
     sf = OUT_DIR / f"_status_{task_id}.json"
@@ -129,8 +62,7 @@ def should_stop(task_id: str) -> bool:
 # ========== 主循环 ==========
 
 def main():
-    pw_cli = find_playwright_cli()
-    log(f"Worker 启动 | playwright-cli: {pw_cli}")
+    log(f"Worker 启动 | 输出目录: {OUT_DIR}")
 
     while True:
         try:
@@ -144,16 +76,20 @@ def main():
                 time.sleep(3)
                 continue
 
-            url = lines[0]
+            page_url = lines[0]
             # 从队列移除第一行
             QUEUE_FILE.write_text("\n".join(lines[1:]) + ("\n" if len(lines) > 1 else ""))
 
+            if not page_url.startswith("http"):
+                log(f"  ⚠ 无效链接: {page_url}")
+                continue
+
             # ---- 生成任务 ID ----
-            vid = re.search(r'/(\d+)', url)
+            vid = re.search(r'/(\d{5,})', page_url)
             vid_id = vid.group(1) if vid else str(int(time.time()))
             out_file = OUT_DIR / f"video_{vid_id}.ts"
 
-            log(url)
+            log(page_url)
 
             # 跳过已下载
             if out_file.exists():
@@ -164,36 +100,24 @@ def main():
 
             # 全局锁：同一时间只处理一个下载
             if LOCK_FILE.exists():
-                log("  ⏭ 另一个下载任务正在进行，重新排队")
-                # 放回队列
+                log("  ⏳ 另一个任务进行中，重新排队")
                 with open(QUEUE_FILE, "a") as f:
-                    f.write(url + "\n")
+                    f.write(page_url + "\n")
                 time.sleep(5)
                 continue
 
             LOCK_FILE.touch()
             write_status(vid_id, status="extracting", done=0, total=0)
 
-            # ---- 提取 m3u8 ----
-            m3u8 = extract_m3u8(pw_cli, url)
-            if not m3u8:
-                log("  ❌ 未找到视频")
-                write_status(vid_id, status="fail", done=0, total=0, error="m3u8 not found")
-                LOCK_FILE.unlink(missing_ok=True)
-                continue
-
             # 检查停止信号
             if should_stop(vid_id):
                 log("  ⏹ 已停止")
-                write_status(vid_id, status="stopped", done=0, total=0)
+                write_status(vid_id, status="stopped")
                 LOCK_FILE.unlink(missing_ok=True)
-                STOP_SIGNAL_DIR.mkdir(exist_ok=True)
                 continue
 
-            write_status(vid_id, status="downloading", done=0, total=100)
-
-            # ---- 下载 ----
-            referer = get_referer(url)
+            # ---- 使用 download_video.py 的 --page-url 全自动处理 ----
+            # 它会：抓页面 → 找 m3u8 → 下载分片 → 合并
             status_file = OUT_DIR / f"_status_{vid_id}.json"
 
             # 读取自定义输出目录配置
@@ -209,26 +133,23 @@ def main():
 
             cmd = [
                 sys.executable, "-u", str(DOWNLOAD_SCRIPT),
-                "--url", m3u8,
-                "--referer", referer,
+                "--page-url", page_url,
                 "--output", f"video_{vid_id}.ts",
                 "--output-dir", output_dir,
                 "--workers", "5",
                 "--status-file", str(status_file),
             ]
 
-            log(f"  📥 开始下载...")
+            log(f"  📥 自动处理中...")
             try:
                 result = subprocess.run(
                     cmd, capture_output=True, text=True, timeout=1200, cwd=str(BASE_DIR))
 
-                # 检查是否被用户停止
+                # 检查停止信号
                 if should_stop(vid_id):
                     log("  ⏹ 已停止")
                     write_status(vid_id, status="stopped")
-                    # 停止信号发给 download_video.py — 它通过 SIGINT 处理
                     LOCK_FILE.unlink(missing_ok=True)
-                    STOP_SIGNAL_DIR.mkdir(exist_ok=True)
                     continue
 
                 # 检查结果
@@ -239,10 +160,15 @@ def main():
                     log(f"  ✅ {size}")
                     write_status(vid_id, status="done", size=size)
                 else:
-                    log(f"  ❌ 失败 (详见日志)")
-                    write_status(vid_id, status="fail", error=output[-200:])
+                    log(f"  ❌ 失败")
+                    write_status(vid_id, status="fail", error=output[-300:])
+                    # 输出日志帮助排查
+                    for line in output.splitlines():
+                        if "ERROR" in line or "失败" in line or "Error" in line:
+                            log(f"     {line.strip()}")
+
             except subprocess.TimeoutExpired:
-                log("  ❌ 下载超时 (20分钟)")
+                log("  ❌ 超时 (20分钟)")
                 write_status(vid_id, status="fail", error="timeout")
 
             LOCK_FILE.unlink(missing_ok=True)
