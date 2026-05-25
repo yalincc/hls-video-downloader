@@ -1,0 +1,4 @@
+flask>=2.0
+requests>=2.25
+tqdm>=4.60
+pycryptodome>=3.10

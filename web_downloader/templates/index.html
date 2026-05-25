@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>HLS Video Downloader</title>
+<style>
+:root { --bg:#0d0f14; --card:#161820; --border:#252830; --text:#e0e0e0; --muted:#6b7280; --accent:#6366f1; --green:#10b981; --red:#ef4444; --yellow:#f59e0b; --radius:10px; }
+* { margin:0; box-sizing:border-box; }
+body { font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif; background:var(--bg); color:var(--text); min-height:100vh; padding:24px; max-width:960px; margin:0 auto; }
+h1 { font-size:20px; margin-bottom:4px; }
+.sub { color:var(--muted); font-size:13px; margin-bottom:24px; }
+.card { background:var(--card); border:1px solid var(--border); border-radius:var(--radius); padding:16px; margin-bottom:16px; }
+textarea { width:100%; height:100px; background:var(--bg); border:1px solid var(--border); border-radius:var(--radius); color:var(--text); padding:12px; font-size:13px; resize:vertical; font-family:monospace; outline:none; }
+textarea:focus { border-color:var(--accent); }
+.row { display:flex; gap:10px; margin-top:10px; flex-wrap:wrap; align-items:center; }
+.btn { padding:8px 16px; border-radius:6px; font-size:13px; cursor:pointer; border:none; font-weight:600; transition:opacity .15s; }
+.btn:hover { opacity:.8; }
+.btn-primary { background:var(--accent); color:#fff; }
+.btn-danger { background:var(--red); color:#fff; }
+.btn-outline { background:transparent; border:1px solid var(--border); color:var(--text); }
+
+/* Stats bar */
+.stats { display:flex; gap:20px; font-size:12px; color:var(--muted); padding:10px 14px; background:var(--card); border:1px solid var(--border); border-radius:6px; margin-bottom:16px; flex-wrap:wrap; }
+.stats span { display:flex; align-items:center; gap:4px; }
+
+/* Task cards */
+#task-list { display:flex; flex-direction:column; gap:8px; margin-bottom:16px; }
+.task-card { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px 14px; }
+.task-card .task-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:6px; }
+.task-card .task-id { font-size:11px; color:var(--muted); }
+.task-card .task-status { font-size:11px; font-weight:600; padding:2px 8px; border-radius:4px; }
+.task-status.downloading { color:var(--accent); background:#6366f110; }
+.task-status.done { color:var(--green); background:#10b98110; }
+.task-status.fail { color:var(--red); background:#ef444410; }
+.task-status.stopped { color:var(--yellow); background:#f59e0b10; }
+.task-status.waiting { color:var(--muted); background:#6b728010; }
+.task-card .task-url { font-size:11px; color:var(--muted); margin-bottom:8px; word-break:break-all; }
+
+/* Progress bar */
+.progress-bar { height:5px; background:var(--border); border-radius:3px; overflow:hidden; margin-bottom:6px; }
+.progress-fill { height:100%; background:var(--accent); border-radius:3px; transition:width .3s ease; }
+.progress-fill.done { background:var(--green); }
+.progress-fill.fail { background:var(--red); }
+.progress-fill.stopped { background:var(--yellow); }
+.task-card .progress-info { font-size:11px; color:var(--muted); display:flex; justify-content:space-between; }
+
+/* Log */
+#log-wrapper { background:#0003; border-radius:6px; }
+#log-header { padding:8px 12px; font-size:12px; color:var(--muted); border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }
+#log-content { padding:8px 12px; max-height:280px; overflow-y:auto; font-family:monospace; font-size:11px; color:var(--muted); white-space:pre-wrap; word-break:break-all; line-height:1.5; }
+#log-content .ok { color:var(--green); }
+#log-content .err { color:var(--red); }
+#log-content .warn { color:var(--yellow); }
+#log-content .info { color:var(--accent); }
+
+/* Config row */
+.config-row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; font-size:12px; color:var(--muted); }
+.config-row label { display:flex; align-items:center; gap:6px; }
+.config-row input[type="text"] { background:var(--bg); border:1px solid var(--border); border-radius:4px; color:var(--text); padding:4px 8px; font-size:12px; width:200px; outline:none; }
+.config-row input[type="text"]:focus { border-color:var(--accent); }
+</style>
+</head>
+<body>
+<h1>📥 HLS Video Downloader</h1>
+<p class="sub">粘贴视频链接 → 加入队列 → 自动提取 m3u8 并下载</p>
+
+<div class="card">
+  <textarea id="url-input" placeholder="粘贴视频页面链接，一行一个。&#10;示例: https://example.com/video/12345"></textarea>
+  <div class="row">
+    <button class="btn btn-primary" onclick="addUrls()">➕ 加入队列</button>
+    <button class="btn btn-outline" onclick="document.getElementById('file-input').click()">📂 上传 .txt</button>
+    <input type="file" id="file-input" accept=".txt" onchange="loadFile(this)" hidden>
+  </div>
+  <div class="config-row" style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
+    <label>📁 输出目录:
+      <input type="text" id="output-dir" placeholder="video_download">
+    </label>
+    <button class="btn btn-outline" style="padding:4px 10px;font-size:11px;" onclick="saveConfig()">保存</button>
+    <span id="config-msg" style="font-size:11px;"></span>
+  </div>
+</div>
+
+<div class="stats">
+  <span>📋 队列: <strong id="queue-count">0</strong></span>
+  <span>📂 已下载: <strong id="file-count">0</strong></span>
+  <span>⚡ 运行中: <strong id="active-count">0</strong></span>
+</div>
+
+<div id="task-list"></div>
+
+<div class="card">
+  <div id="log-wrapper">
+    <div id="log-header">
+      <span>📋 运行日志</span>
+      <div>
+        <button class="btn btn-outline" style="padding:2px 10px;font-size:11px;" onclick="clearLog()">清空</button>
+        <button class="btn btn-outline" style="padding:2px 10px;font-size:11px;" onclick="refreshStatus()">🔄 刷新</button>
+      </div>
+    </div>
+    <div id="log-content">等待任务...</div>
+  </div>
+</div>
+
+<script>
+// 配置管理
+function loadConfig() {
+  try {
+    const cfg = JSON.parse(localStorage.getItem('dl_config') || '{}');
+    if (cfg.outputDir) document.getElementById('output-dir').value = cfg.outputDir;
+  } catch(e) {}
+}
+function saveConfig() {
+  const dir = document.getElementById('output-dir').value.trim();
+  localStorage.setItem('dl_config', JSON.stringify({ outputDir: dir }));
+  document.getElementById('config-msg').textContent = '✓ 已保存';
+  setTimeout(() => document.getElementById('config-msg').textContent = '', 2000);
+}
+
+// 添加 URL
+function addUrls() {
+  const text = document.getElementById('url-input').value.trim();
+  if (!text) return alert('请输入链接');
+  const urls = text.split('\n').map(s => s.trim()).filter(Boolean);
+  if (!urls.length) return alert('请输入链接');
+  
+  const config = JSON.parse(localStorage.getItem('dl_config') || '{}');
+  
+  fetch('/api/add', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ urls, outputDir: config.outputDir || '' })
+  })
+  .then(r => r.json())
+  .then(d => {
+    document.getElementById('url-input').value = '';
+    refreshStatus();
+  });
+}
+
+function loadFile(input) {
+  const f = input.files[0];
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = e => document.getElementById('url-input').value = e.target.result;
+  r.readAsText(f);
+}
+
+// 渲染任务卡片
+function renderTasks(tasks) {
+  const el = document.getElementById('task-list');
+  if (!tasks || !tasks.length) {
+    el.innerHTML = '<div class="card" style="text-align:center;padding:20px;color:var(--muted);font-size:13px;">暂无下载任务</div>';
+    return;
+  }
+  el.innerHTML = tasks.map(t => {
+    const pct = t.total > 0 ? Math.round(t.done / t.total * 100) : 0;
+    const statusClass = t.status;
+    const statusLabel = { downloading:'下载中', done:'已完成', fail:'失败', stopped:'已停止', waiting:'等待中', extracting:'提取中' }[t.status] || t.status;
+    const barClass = t.status === 'done' ? 'done' : t.status === 'fail' ? 'fail' : t.status === 'stopped' ? 'stopped' : '';
+    const showBar = t.status === 'downloading' || t.status === 'extracting';
+    const showStop = t.status === 'downloading' || t.status === 'extracting';
+    
+    return '<div class="task-card" id="task-' + t.id + '">' +
+      '<div class="task-header">' +
+        '<span class="task-id">video_' + t.id + '</span>' +
+        '<div>' +
+          (showStop ? '<button class="btn btn-danger" style="padding:2px 8px;font-size:10px;margin-right:6px;" onclick="stopTask(\'' + t.id + '\')">⏹ 停止</button>' : '') +
+          '<span class="task-status ' + statusClass + '">' + statusLabel + (showBar ? ' ' + pct + '%' : '') + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="task-url">' + (t.url || '') + '</div>' +
+      (showBar ? '<div class="progress-bar"><div class="progress-fill ' + barClass + '" style="width:' + pct + '%"></div></div>' : '') +
+      '<div class="progress-info">' +
+        '<span>' + (t.status === 'downloading' ? t.done + '/' + t.total + ' 分片' : t.size || '') + '</span>' +
+        '<span>' + (t.speed || '') + '</span>' +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+// 停止任务
+function stopTask(taskId) {
+  fetch('/api/stop/' + taskId, { method: 'POST' })
+    .then(r => r.json())
+    .then(d => refreshStatus());
+}
+
+// 刷新状态
+function refreshStatus() {
+  fetch('/api/status')
+    .then(r => r.json())
+    .then(d => {
+      document.getElementById('queue-count').textContent = d.queue;
+      document.getElementById('file-count').textContent = d.files;
+      document.getElementById('active-count').textContent = d.active;
+      document.getElementById('log-content').innerHTML = d.logHtml || '等待任务...';
+      renderTasks(d.tasks);
+    })
+    .catch(() => {});
+}
+
+// 清空日志
+function clearLog() {
+  if (!confirm('清空日志？')) return;
+  fetch('/api/log/clear', { method: 'POST' })
+    .then(() => refreshStatus());
+}
+
+// 自动刷新
+loadConfig();
+refreshStatus();
+setInterval(refreshStatus, 3000);
+</script>
+</body>
+</html>

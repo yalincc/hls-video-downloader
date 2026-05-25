@@ -1,0 +1,7 @@
+# 每行一个视频页面链接
+# 程序会依次处理（不会并发下载多个视频）
+# 已下载的文件会自动跳过
+
+# 示例:
+# https://example.com/video/12345
+# https://example.com/video/67890

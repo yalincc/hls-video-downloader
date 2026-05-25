@@ -1,0 +1,27 @@
+# Output
+video_download/
+*.ts
+
+# Temp download fragments
+.tmp_*/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Config (user-specific)
+.domain_config.json
