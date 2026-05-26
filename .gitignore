@@ -1,16 +1,21 @@
-# Output
-video_download/
+# Runtime output
+downloads/
 *.ts
+*.mp4
+queue.txt
 
-# Temp download fragments
+# Temp
 .tmp_*/
-
-# Python
-__pycache__/
 *.py[cod]
-*.egg-info/
+__pycache__/
+
+# Build
 dist/
 build/
+*.spec
+
+# Binary dependencies (install separately)
+ffmpeg.exe
 
 # OS
 .DS_Store
@@ -22,6 +27,3 @@ Desktop.ini
 .idea/
 *.swp
 *.swo
-
-# Config (user-specific)
-.domain_config.json

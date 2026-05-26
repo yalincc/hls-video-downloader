@@ -1,6 +1,13 @@
-flask>=2.0
+# 核心
 requests>=2.25
 tqdm>=4.60
-# AES-128 解密（二选一即可，cryptography 常预装）
+flask>=2.0
+
+# 加密
 pycryptodome>=3.10
-# cryptography>=35.0
+
+# 提取器（可选但推荐）
+yt-dlp>=2024.0
+
+# 浏览器提取（可选）
+# playwright>=1.40

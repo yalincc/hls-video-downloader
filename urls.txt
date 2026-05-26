@@ -1,0 +1,6 @@
+# 示例 URL 文件
+# 每行一个视频链接，配合批量下载使用
+# 目前批量功能还在开发中，可以直接用命令行逐个下载：
+#   python download.py <链接>
+
+https://www.33cctt.com/b1e5b1/se/play-30-143545.html
